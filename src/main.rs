@@ -10,14 +10,14 @@ mod util;
 #[macro_use]
 extern crate rocket;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 #[serde(crate = "rocket::serde")]
 pub struct DB {
     pub uri: String,
     pub name: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 #[serde(crate = "rocket::serde")]
 pub struct Config {
     pub mongodb: DB,
