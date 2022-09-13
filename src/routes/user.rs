@@ -53,12 +53,11 @@ pub async fn sign_in<'a>(
 ) -> Result<String, Error> {
     form.validate()?;
     let filter = doc! {"name" : &form.name};
-    let find_user_not_found = format!("User {} not found", &form.name);
     let user = db
         .collection::<User>("user")
         .find_one(filter, None)
         .await?
-        .ok_or(Error::NotFound(find_user_not_found))?;
+        .ok_or(Error::NotFound(format!("User {} not found", &form.name)))?;
     let id = user
         .id
         .ok_or(Error::Server("User has no id".to_string()))?
