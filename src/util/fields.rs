@@ -6,7 +6,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 
 lazy_static! {
-    static ref NAME_REGEX: Regex = Regex::new(r"[A-Za-z0-9áéíóúüñ_\- ]$").unwrap();
+    static ref NAME_REGEX: Regex = Regex::new(r"[A-Za-z0-9\-]$").unwrap();
 }
 
 const MIN_NAME_LEN: usize = 1;
