@@ -13,12 +13,19 @@ pub struct CreateUserForm {
     pub name: String,
     pub password: String,
 }
+
 impl CreateUserForm {
     pub fn validate(&self) -> Result<(), Error> {
         fields::name::validate("Name", &self.name)?;
         fields::password::validate(&self.password)?;
         Ok(())
     }
+}
+
+#[get("/load")]
+pub async fn load<'a>(user: Result<User, Error>) -> Result<String, Error> {
+    let user = user?;
+    Ok(user.name)
 }
 
 #[post("/create", format = "form", data = "<form>")]
@@ -37,6 +44,7 @@ pub struct SignInForm {
     pub name: String,
     pub password: String,
 }
+
 impl SignInForm {
     pub fn validate(&self) -> Result<(), Error> {
         fields::name::validate("Name", &self.name)?;
@@ -64,9 +72,14 @@ pub async fn sign_in<'a>(
         .to_string();
     if fields::password::verify(&user.password, &form.password)? {
         jar.add_private(Cookie::new("id", id));
-        let ok = format!("User {} signed in.", user.name);
-        return Ok(ok);
+        Ok(user.name)
     } else {
         return Err(Error::Unauthorized("Incorrect password".to_string()));
     }
+}
+
+#[get("/sign_out")]
+pub async fn sign_out<'a>(jar: &CookieJar<'a>) -> &'a str {
+    jar.remove_private(Cookie::named("id"));
+    "signed out"
 }

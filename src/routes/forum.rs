@@ -12,7 +12,7 @@ use crate::model::user::User;
 use crate::util::error::Error;
 use crate::util::fields;
 
-use rocket::response::stream::TextStream;
+use rocket::response::stream::{Event, EventStream};
 use rocket::tokio::select;
 use rocket::tokio::sync::broadcast::{error::RecvError, Sender};
 use rocket::Shutdown;
@@ -24,11 +24,11 @@ pub async fn listen(
     queue: &State<Sender<Message>>,
     f: String,
     mut end: Shutdown,
-) -> Result<TextStream![String], Error> {
+) -> Result<EventStream![], Error> {
     let user = user?;
     user._permitted(&db, &f).await?;
     let mut rx = queue.subscribe();
-    Ok(TextStream! {
+    Ok(EventStream! {
         loop {
             let msg = select! {
                 msg = rx.recv() => match msg {
@@ -44,16 +44,18 @@ pub async fn listen(
                 },
                 _ = &mut end => break,
             };
-            yield format!("{}\n", msg.value.trim());
+            yield Event::data(format!("{}: {}", &msg.user, msg.value));
         }
     })
 }
 
-#[derive(Clone, FromForm)]
+#[derive(Clone, FromForm, Debug)]
 pub struct Message {
+    pub user: String,
     pub forum_hex_id: String,
     pub value: String,
 }
+
 impl Message {
     pub fn validate(&self) -> Result<(), Error> {
         fields::oid_hex::validate(&self.forum_hex_id)?;
@@ -80,6 +82,7 @@ pub async fn message(
 pub struct CreateForumForm {
     pub name: String,
 }
+
 impl CreateForumForm {
     pub fn validate(&self) -> Result<(), Error> {
         fields::name::validate("Forum name", &self.name)?;
@@ -151,6 +154,7 @@ pub struct UpdateUsers {
     pub id: String,
     pub permitted_users: Vec<String>,
 }
+
 impl UpdateUsers {
     pub fn validate(&self) -> Result<(), Error> {
         fields::oid_hex::validate(&self.id)?;
@@ -163,7 +167,7 @@ impl UpdateUsers {
 pub async fn update_users(
     db: &State<Database>,
     user: Result<User, Error>,
-    update_users: Json<UpdateUsers>,
+    mut update_users: Json<UpdateUsers>,
 ) -> Result<String, Error> {
     update_users.validate()?;
     let user = user?;
@@ -180,6 +184,7 @@ pub async fn update_users(
             &user.name
         )));
     }
+    update_users.permitted_users.insert(0, user.name);
     let set = doc! {
         "$set": {
             "permitted_users" : update_users.permitted_users.to_owned()
