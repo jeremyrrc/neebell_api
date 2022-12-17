@@ -9,6 +9,7 @@ use std::error::Error;
 use toml;
 mod model;
 
+
 mod routes;
 mod util;
 
@@ -92,3 +93,4 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await?;
     Ok(())
 }
+

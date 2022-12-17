@@ -4,6 +4,7 @@ use mongodb::options::FindOptions;
 use mongodb::Database;
 use rocket::form::{Form, FromForm};
 use rocket::post;
+use rocket::serde::Serialize;
 use rocket::serde::{json::Json, Deserialize};
 use rocket::State;
 
@@ -44,12 +45,13 @@ pub async fn listen(
                 },
                 _ = &mut end => break,
             };
-            yield Event::data(format!("{}: {}", &msg.user, msg.value));
+            yield Event::json(&msg);
         }
     })
 }
 
-#[derive(Clone, FromForm, Debug)]
+#[derive(Clone, Serialize, FromForm, Debug)]
+#[serde(crate = "rocket::serde")]
 pub struct Message {
     pub user: String,
     pub forum_hex_id: String,
