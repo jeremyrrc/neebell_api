@@ -9,6 +9,7 @@ pub struct Forum {
     pub id: Option<ObjectId>,
     pub name: String,
     pub owner_id: ObjectId,
+    pub owner: String,
     pub permitted_users: Vec<String>,
 }
 
@@ -17,7 +18,7 @@ pub struct Forum {
 pub struct ForumListItem {
     _id: ObjectId,
     name: String,
-    permitted_users: Vec<String>,
+    owner: String,
 }
 
 impl ForumListItem {
@@ -25,7 +26,23 @@ impl ForumListItem {
         doc! {
             "_id" : 1,
             "name" : 1,
+            "owner": 1,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(crate = "rocket::serde")]
+pub struct ForumItem {
+    pub permitted_users: Vec<String>,
+}
+
+impl ForumItem {
+    pub fn projection() -> Document {
+        doc! {
             "permitted_users": 1,
         }
     }
 }
+
+

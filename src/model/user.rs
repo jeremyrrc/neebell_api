@@ -9,8 +9,9 @@ use rocket::request::{FromRequest, Outcome, Request};
 use rocket::serde::{Deserialize, Serialize};
 use rocket::State;
 use sodiumoxide::crypto::pwhash::argon2id13::HashedPassword;
+use std::clone::Clone;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(crate = "rocket::serde")]
 pub struct User {
     #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
@@ -32,6 +33,7 @@ impl User {
         Ok(user)
     }
 
+    // check if the user is a permitted user on a forum.
     pub async fn _permitted(&self, db: &Database, forum_hex_id: &str) -> Result<(), Error> {
         let forum_oid = ObjectId::parse_str(forum_hex_id)?;
         let filter = doc! {"_id": forum_oid, "permitted_users": &self.name};

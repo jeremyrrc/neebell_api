@@ -1,14 +1,13 @@
-use lazy_static::lazy_static;
 use mongodb::{Client, Database};
 use rocket::fairing::AdHoc;
 use rocket::http::Header;
 use rocket::routes;
 use rocket::serde::Deserialize;
 use rocket::tokio::sync::broadcast::channel;
+use rocket::tokio::fs::read_to_string;
 use std::error::Error;
 use toml;
 mod model;
-
 
 mod routes;
 mod util;
@@ -38,12 +37,8 @@ pub struct Config {
 
 #[rocket::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    lazy_static! {
-        static ref CONFIG: Config = {
-            let string_config = std::fs::read_to_string("../Config.toml").unwrap();
-            toml::from_str(string_config.as_str()).unwrap()
-        };
-    }
+    let s = read_to_string("../Config.toml").await.unwrap();
+    let config: Config = toml::from_str(s.as_str()).unwrap();
 
     let cors = AdHoc::on_response("CORS", move |_, resp| {
         Box::pin(async move {
@@ -61,12 +56,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         })
     });
 
-    let client = Client::with_uri_str(&CONFIG.mongodb.uri).await.unwrap();
-    let db: Database = client.database(&CONFIG.mongodb.name.as_str());
+    let client = Client::with_uri_str(&config.mongodb.uri).await.unwrap();
+    let db: Database = client.database(&config.mongodb.name.as_str());
     let _ = rocket::build()
         .attach(cors)
         .manage(db)
         .manage(channel::<routes::forum::Message>(1024).0)
+        .manage(channel::<routes::forum::AddedPermittedUsers>(1024).0)
+        .manage(channel::<routes::forum::RemovedPermittedUsers>(1024).0)
+        .manage(channel::<routes::forum::Listener>(1024).0)
         .register("/", util::error::catchers::BASIC.clone())
         .mount(
             "/user",
@@ -80,17 +78,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .mount(
             "/forum",
             routes![
-                routes::forum::listen,
-                // routes::forum::preflight,
+                routes::forum::listen_messages,
+                routes::forum::listen_listening_users,
+                routes::forum::listen_updated_permitted_users,
                 routes::forum::message,
                 routes::forum::create,
                 routes::forum::list_owned,
                 routes::forum::list_permitted,
                 routes::forum::update_users,
+                routes::forum::forum,
             ],
         )
         .launch()
         .await?;
     Ok(())
 }
-

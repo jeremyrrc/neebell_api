@@ -14,6 +14,8 @@ pub enum Error {
     Unauthorized(String),
     #[response(status = 400, content_type = "text")]
     BadRequest(String),
+    #[response(status = 204, content_type = "text")]
+    NoContent(String),
 }
 
 impl From<MongoError> for Error {
