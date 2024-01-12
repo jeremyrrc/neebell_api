@@ -3,16 +3,17 @@ use mongodb::bson::{doc, oid::ObjectId};
 use mongodb::options::{FindOneOptions, FindOptions};
 use mongodb::Database;
 use rocket::form::{Form, FromForm};
-use rocket::post;
 use rocket::serde::json::Json;
 use rocket::serde::Serialize;
 use rocket::State;
+use rocket::{post, Request};
 use std::collections::HashSet;
 
 use crate::model::forum::{Forum, ForumItem, ForumListItem};
-use crate::model::user::User;
+use crate::model::user::{user_by_token, User};
 use crate::util::error::Error;
 use crate::util::fields;
+use crate::{allow_origin, Secret};
 
 use rocket::response::stream::{Event, EventStream};
 use rocket::tokio::sync::broadcast::{error::RecvError, Sender};
@@ -23,24 +24,29 @@ use rocket::Shutdown;
 #[derive(Serialize, Debug)]
 #[serde(crate = "rocket::serde")]
 enum MessageYield {
-    M(Message),
-    C,
+    Message(Message),
+    Closed,
 }
 
-#[get("/listen-messages?<f>")]
+#[get("/listen-messages?<f>&<jwt>")]
 pub async fn listen_messages<'a>(
     db: &'a State<Database>,
-    user: Result<User, Error>,
+    secret: &'a State<Secret>,
+    // user: Result<User, Error>,
     message_queue: &'a State<Sender<Message>>,
+    unsubscribe_queue: &'a State<Sender<Unsubscribe>>,
     listeners_queue: &'a State<Sender<Listener>>,
     removed_queue: &'a State<Sender<RemovedPermittedUsers>>,
     f: String,
+    jwt: String,
     mut shutdown: Shutdown,
 ) -> Result<EventStream![Event + 'a], Error> {
-    let user = user.or(Err(Error::NoContent("Not signed in".to_string())))?;
-    user._permitted(&db, &f)
-        .await
-        .or(Err(Error::NoContent("Not signed in".to_string())))?;
+    println!("{jwt}");
+    // let user = user.or(Err(Error::NoContent("Not signed in".to_string())))?;
+    // user._permitted(&db, &f)
+    //     .await
+    //     .or(Err(Error::NoContent("Not signed in".to_string())))?;
+    let user = user_by_token(&jwt, secret, db).await?;
 
     let listener = Listener {
         forum_hex_id: f,
@@ -48,6 +54,7 @@ pub async fn listen_messages<'a>(
     };
 
     let mut rx_message = message_queue.subscribe();
+    let mut rx_unsubscribe = unsubscribe_queue.subscribe();
     let mut rx_removed = removed_queue.subscribe();
 
     let (signal, mut close) = rocket::tokio::sync::mpsc::channel::<()>(32);
@@ -61,7 +68,19 @@ pub async fn listen_messages<'a>(
                 msg = rx_message.recv() => match msg {
                     Ok(msg) => {
                         if msg.forum_hex_id == listener.forum_hex_id {
-                            MessageYield::M(msg)
+                            MessageYield::Message(msg)
+                        } else {
+                            continue
+                        }
+                    },
+                    Err(RecvError::Closed) => break,
+                    Err(RecvError::Lagged(_)) => continue,
+                },
+                un = rx_unsubscribe.recv() => match un {
+                    Ok(un) => {
+                        if un.forum_hex_id == listener.forum_hex_id && un.user_name == listener.user_name {
+                            // MessageYield::Closed
+                            break
                         } else {
                             continue
                         }
@@ -72,7 +91,8 @@ pub async fn listen_messages<'a>(
                 rm = rx_removed.recv() => match rm {
                     Ok(rm) => {
                         if rm.forum_hex_id == listener.forum_hex_id && rm.removed.contains(&listener.user_name) {
-                            MessageYield::C
+                            // MessageYield::Closed
+                            break
                         } else {
                             continue
                         }
@@ -89,8 +109,8 @@ pub async fn listen_messages<'a>(
             };
 
             match msg {
-                MessageYield::M(m) => yield Event::json(&m),
-                MessageYield::C => {
+                MessageYield::Message(m) => yield Event::json(&m),
+                MessageYield::Closed => {
                     let _ = signal.clone().send(());
                     close.close();
                     yield Event::empty().event("closed".to_string())
@@ -109,26 +129,29 @@ pub struct Listener {
     pub user_name: String,
 }
 
-#[get("/listen-listening-users?<f>")]
+#[get("/listen-listening-users?<f>&<jwt>")]
 pub async fn listen_listening_users(
     db: &State<Database>,
-    user: Result<User, Error>,
+    // user: Result<User, Error>,
     queue: &State<Sender<Listener>>,
     f: String,
+    jwt: String,
+    secret: &State<Secret>,
     mut end: Shutdown,
 ) -> Result<EventStream![], Error> {
-    let user = user.or(Err(Error::NoContent("Not signed in".to_string())))?;
+    // let user = user.or(Err(Error::NoContent("Not signed in".to_string())))?;
+    let user = user_by_token(&jwt, secret, db).await?;
     user._permitted(&db, &f)
         .await
         .or(Err(Error::NoContent("Not signed in".to_string())))?;
     let mut rx = queue.subscribe();
     Ok(EventStream! {
         loop {
-            let listener = select! {
+            let user_name = select! {
                 lis = rx.recv() => match lis {
                     Ok(lis) => {
                         if lis.forum_hex_id == f && lis.user_name != user.name{
-                            lis
+                            lis.user_name
                         } else {
                             continue
                         }
@@ -138,7 +161,7 @@ pub async fn listen_listening_users(
                 },
                 _ = &mut end => break,
             };
-            yield Event::data(format!("{}{}", listener.user_name, listener.forum_hex_id ));
+            yield Event::data(user_name.clone());
         }
     })
 }
@@ -176,6 +199,27 @@ pub async fn message(
 
 #[derive(Clone, Serialize, Debug)]
 #[serde(crate = "rocket::serde")]
+pub struct Unsubscribe {
+    pub forum_hex_id: String,
+    pub user_name: String,
+}
+
+#[get("/unsubscribe-messages?<f>")]
+pub async fn unsubscribe_messages(
+    user: Result<User, Error>,
+    queue: &State<Sender<Unsubscribe>>,
+    f: String,
+) -> Result<(), Error> {
+    let user = user?;
+    let _ = queue.send(Unsubscribe {
+        forum_hex_id: f,
+        user_name: user.name,
+    });
+    Ok(())
+}
+
+#[derive(Clone, Serialize, Debug)]
+#[serde(crate = "rocket::serde")]
 pub struct AddedPermittedUsers {
     pub forum_hex_id: String,
     pub added: Vec<String>,
@@ -191,20 +235,23 @@ pub struct RemovedPermittedUsers {
 #[derive(Serialize, Debug)]
 #[serde(crate = "rocket::serde")]
 enum UpdatePermittedUsersMessage {
-    A(AddedPermittedUsers),
-    R(RemovedPermittedUsers),
+    Add(AddedPermittedUsers),
+    Remove(RemovedPermittedUsers),
 }
 
-#[get("/listen-updated-permitted-users?<f>")]
+#[get("/listen-updated-permitted-users?<f>&<jwt>")]
 pub async fn listen_updated_permitted_users(
     db: &State<Database>,
-    user: Result<User, Error>,
+    // user: Result<User, Error>,
     added_queue: &State<Sender<AddedPermittedUsers>>,
     removed_queue: &State<Sender<RemovedPermittedUsers>>,
     f: String,
+    jwt: String,
+    secret: &State<Secret>,
     mut shutdown: Shutdown,
 ) -> Result<EventStream![], Error> {
-    let user = user.or(Err(Error::NoContent("Not signed in".to_string())))?;
+    // let user = user.or(Err(Error::NoContent("Not signed in".to_string())))?;
+    let user = user_by_token(&jwt, secret, db).await?;
     user._permitted(&db, &f)
         .await
         .or(Err(Error::NoContent("Not signed in".to_string())))?;
@@ -216,7 +263,7 @@ pub async fn listen_updated_permitted_users(
                 msg = rx_added.recv() => match msg {
                     Ok(msg) => {
                         if msg.forum_hex_id == f {
-                            UpdatePermittedUsersMessage::A(msg)
+                            UpdatePermittedUsersMessage::Add(msg)
                         } else {
                             continue
                         }
@@ -227,7 +274,7 @@ pub async fn listen_updated_permitted_users(
                 msg = rx_removed.recv() => match msg {
                     Ok(msg) => {
                         if msg.forum_hex_id == f {
-                            UpdatePermittedUsersMessage::R(msg)
+                            UpdatePermittedUsersMessage::Remove(msg)
                         } else {
                             continue
                         }
@@ -237,10 +284,15 @@ pub async fn listen_updated_permitted_users(
                 },
                 _ = &mut shutdown => break,
             };
-            match msg {
-                UpdatePermittedUsersMessage::A(m) => yield Event::json(&m.added).event("added".to_string()),
-                UpdatePermittedUsersMessage::R(m) => yield Event::json(&m.removed).event("removed".to_string())
-            }
+            // match msg {
+            //     UpdatePermittedUsersMessage::Add(m) => yield Event::json(&m.added).event("added".to_string()),
+            //     UpdatePermittedUsersMessage::Remove(m) => yield Event::json(&m.removed).event("removed".to_string())
+            // }
+            yield Event::json(&msg)
+            // match msg {
+            //     UpdatePermittedUsersMessage::Add(m) => yield Event::json(&m.added).event("added".to_string()),
+            //     UpdatePermittedUsersMessage::Remove(m) => yield Event::json(&m.removed).event("removed".to_string())
+            // }
         }
     })
 }
@@ -302,6 +354,12 @@ pub async fn update_users(
     let changed: HashSet<String> = changed.iter().cloned().collect();
 
     let removed: Vec<String> = (&current - &changed).iter().cloned().collect();
+    if removed.contains(&forum.owner) {
+        return Err(Error::BadRequest(format!(
+            "Cannot remove the owner of the forum: {}",
+            &forum.owner
+        )));
+    }
     let added: Vec<String> = (&changed - &current).iter().cloned().collect();
 
     let _ = forum_coll.update_one(filter, set, None).await?;

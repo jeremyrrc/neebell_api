@@ -1,31 +1,46 @@
-use crate::model::user::User;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::model::user::{JWTUserPayload, User};
 use crate::util::error::Error;
 use crate::util::fields;
+use crate::Secret;
+use jsonwebtoken::{encode, EncodingKey, Header};
 use mongodb::bson::doc;
 use mongodb::Database;
 use rocket::form::{Form, FromForm};
 use rocket::http::{Cookie, CookieJar};
-use rocket::State;
 use rocket::post;
+use rocket::serde::{json::Json, Serialize};
+use rocket::State;
 
 #[derive(FromForm)]
 pub struct CreateUserForm {
     pub name: String,
     pub password: String,
+    pub confirm_password: String,
 }
 
 impl CreateUserForm {
     pub fn validate(&self) -> Result<(), Error> {
         fields::name::validate("Name", &self.name)?;
         fields::password::validate(&self.password)?;
+        if &self.password != &self.confirm_password {
+            return Err(Error::BadRequest("Password don't match".to_string()));
+        }
         Ok(())
     }
 }
 
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+pub struct LoadResponse {
+    pub name: String,
+}
+
 #[get("/load")]
-pub async fn load<'a>(user: Result<User, Error>) -> Result<String, Error> {
+pub async fn load<'a>(user: Result<User, Error>) -> Result<Json<LoadResponse>, Error> {
     let user = user?;
-    Ok(user.name)
+    Ok(Json(LoadResponse { name: user.name }))
 }
 
 #[post("/create", format = "form", data = "<form>")]
@@ -53,12 +68,38 @@ impl SignInForm {
     }
 }
 
+fn generate_token(secret: &[u8], oid: String) -> Result<String, Error> {
+    let curr_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards");
+    let expiration_after = 3600 * 24;
+    let exp = (curr_time.as_secs() + expiration_after) as usize;
+    let token = encode(
+        &Header::default(),
+        &JWTUserPayload {
+            sub: "AtSignIn".to_string(),
+            oid,
+            exp,
+        },
+        &EncodingKey::from_secret(secret),
+    )
+    .map_err(|_| Error::Server("Could not generate token".to_string()))?;
+    Ok(token)
+}
+
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+pub struct SignInResponse {
+    pub name: String,
+    pub token: String,
+}
+
 #[post("/sign-in", format = "form", data = "<form>")]
 pub async fn sign_in<'a>(
     db: &State<Database>,
+    secret: &State<Secret>,
     form: Form<SignInForm>,
-    jar: &'a CookieJar<'a>,
-) -> Result<String, Error> {
+) -> Result<Json<SignInResponse>, Error> {
     form.validate()?;
     let filter = doc! {"name" : &form.name};
     let user = db
@@ -70,12 +111,15 @@ pub async fn sign_in<'a>(
         .id
         .ok_or(Error::Server("User has no id".to_string()))?
         .to_string();
-    if fields::password::verify(&user.password, &form.password)? {
-        jar.add_private(Cookie::new("id", id));
-        Ok(user.name)
-    } else {
+    let is_valid_user = fields::password::verify(&user.password, &form.password)?;
+    if !is_valid_user {
         return Err(Error::Unauthorized("Incorrect password".to_string()));
     }
+    let token = generate_token(&secret.inner().0, id)?;
+    Ok(Json(SignInResponse {
+        name: user.name,
+        token,
+    }))
 }
 
 #[get("/sign_out")]

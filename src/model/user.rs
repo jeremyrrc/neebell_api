@@ -2,6 +2,8 @@ use crate::model::forum::Forum;
 use crate::routes::user::CreateUserForm;
 use crate::util::error::Error;
 use crate::util::fields::{name, password};
+use crate::Secret;
+use jsonwebtoken::{decode, DecodingKey, Validation};
 use mongodb::bson::{doc, oid::ObjectId};
 use mongodb::Database;
 use rocket::http::Status;
@@ -48,43 +50,86 @@ impl User {
     }
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(crate = "rocket::serde")]
+pub struct UserByURLToken {
+    user: User,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
+pub struct JWTUserPayload {
+    pub sub: String,
+    pub oid: String,
+    pub exp: usize,
+}
+
 #[rocket::async_trait]
 impl<'r> FromRequest<'r> for User {
     type Error = Error;
-    async fn from_request(request: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        let db = if let Some(d) = request.guard::<&State<Database>>().await.succeeded() {
-            d
-        } else {
-            return Outcome::Failure((
-                Status::InternalServerError,
-                Error::Server("Database not found".to_string()),
-            ));
-        };
-        let oid = request
-            .cookies()
-            .get_private("id")
-            .and_then(|cookie| ObjectId::parse_str(cookie.value()).ok());
-        if let Some(o) = oid {
-            let filter = doc! {"_id": o};
-            let r = db.collection::<User>("user").find_one(filter, None).await;
-            match r {
-                Ok(opt) => match opt {
-                    None => Outcome::Failure((
-                        Status::Unauthorized,
-                        Error::Unauthorized("User not found.".to_string()),
-                    )),
-                    Some(user) => Outcome::Success(user),
-                },
-                Err(_e) => Outcome::Failure((
-                    Status::InternalServerError,
-                    Error::Server("Database error.".to_string()),
-                )),
+    async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
+        let auth_header_value = match req.headers().get_one("Authorization") {
+            Some(h) => &h["Bearer ".len()..],
+            None => {
+                return Outcome::Failure((
+                    Status::BadRequest,
+                    Error::Server("No authorization header".to_string()),
+                ));
             }
-        } else {
-            return Outcome::Failure((
-                Status::Unauthorized,
-                Error::Unauthorized("Not signed in.".to_string()),
-            ));
-        }
+        };
+
+        let secret = match req.guard::<&State<Secret>>().await.succeeded() {
+            // Some(s) => s.0.clone(),
+            Some(s) => s,
+            None => {
+                return Outcome::Failure((
+                    Status::InternalServerError,
+                    Error::Server("Server configuraton error: No secret".to_string()),
+                ));
+            }
+        };
+
+        let db = match req.guard::<&State<Database>>().await.succeeded() {
+            Some(db) => db,
+            None => {
+                return Outcome::Failure((
+                    Status::InternalServerError,
+                    Error::Server("Database not found".to_string()),
+                ));
+            }
+        };
+
+        let r = user_by_token(auth_header_value, secret, db).await;
+        let user = match r {
+            Ok(user) => user,
+            Err(e) => {
+                return Outcome::Failure((Status::Unauthorized, e));
+            }
+        };
+
+        crate::allow_origin(req);
+
+        Outcome::Success(user)
     }
+}
+
+pub async fn user_by_token(token: &str, secret: &Secret, db: &Database) -> Result<User, Error> {
+    let jwt = decode::<JWTUserPayload>(
+        &token,
+        &DecodingKey::from_secret(&secret.0),
+        &Validation::default(),
+    )
+    .map_err(|_| Error::Unauthorized("Bad token".to_string()))?;
+
+    let oid =
+        ObjectId::parse_str(jwt.claims.oid).map_err(|_| Error::BadRequest("Bad id".to_string()))?;
+
+    let filter = doc! {"_id": oid};
+    let user = db
+        .collection::<User>("user")
+        .find_one(filter, None)
+        .await?
+        .ok_or(Error::NotFound("User not found".to_string()))?;
+
+    Ok(user)
 }

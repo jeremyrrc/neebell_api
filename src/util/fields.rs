@@ -16,7 +16,7 @@ const MIN_PASS_LEN: usize = 8;
 const MAX_PASS_LEN: usize = 50;
 
 const MIN_MESS_LEN: usize = 1;
-const MAX_MESS_LEN: usize = 200;
+const MAX_MESS_LEN: usize = 20000;
 
 const MAX_PERMITTED_USERS: usize = 50;
 
